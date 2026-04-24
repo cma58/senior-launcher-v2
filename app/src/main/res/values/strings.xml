@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Senior Launcher</string>
+    <string name="home_greeting_morning">Goedemorgen</string>
+    <string name="home_greeting_afternoon">Goedemiddag</string>
+    <string name="home_greeting_evening">Goedenavond</string>
+    <string name="home_greeting_night">Welterusten</string>
+
+    <string name="sos_button_label">Noodhulp</string>
+    <string name="sos_button_holding">Houd vast…</string>
+    <string name="sos_button_a11y">Noodknop. Houd drie seconden ingedrukt om hulp op te roepen.</string>
+
+    <string name="contact_tile_a11y">Foto-snelkoppeling. Bel %1$s.</string>
+    <string name="contact_call_action">Bel %1$s</string>
+
+    <string name="sos_sms_body">NOODOPROEP: Ik heb hulp nodig. Locatie volgt in aparte melding.</string>
+</resources>
