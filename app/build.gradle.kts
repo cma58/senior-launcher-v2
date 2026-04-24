@@ -17,9 +17,11 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
+    }
 
-        // Flag used by accessibility settings to scale fonts without cap
-        resourceConfigurations += listOf("en", "nl", "fr", "de")
+    // Modern API (AGP 8+) replacing the deprecated defaultConfig.resourceConfigurations
+    androidResources {
+        localeFilters += listOf("en", "nl", "fr", "de")
     }
 
     buildTypes {
