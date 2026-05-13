@@ -1,0 +1,210 @@
+# =============================================================
+#  Senior Launcher v2 — Android CI + APK Release
+# =============================================================
+#  Wat dit workflow-bestand doet:
+#
+#  1. Op elke push naar `main`:
+#     • Bouwt de debug APK
+#     • Upload de APK als "workflow artifact" (30 dagen beschikbaar)
+#     • Werkt de rolling "latest" GitHub Release bij met de nieuwe APK
+#
+#  2. Op een tag-push (bv. `git tag v2.1.0 && git push --tags`):
+#     • Maakt een nieuwe versioned Release met auto-gegenereerde
+#       release notes uit de commits sinds de vorige tag
+#
+#  3. Bij een Pull Request naar main:
+#     • Bouwt alleen — geen release, geen artifact upload
+#
+#  4. Handmatig via "Run workflow" knop:
+#     • Optie om een manual release te maken
+#
+#  Vereisten op repo-niveau:
+#  • GITHUB_TOKEN — door GitHub automatisch geleverd, niets te doen
+#  • permissions.contents.write — hieronder gedeclareerd
+#
+#  Release-signing (voor Play Store):
+#  Nu bouwen we debug-signed APK. Voor release-signed APK moet je
+#  4 secrets toevoegen onder Settings → Secrets and variables → Actions:
+#    SIGNING_KEY_BASE64      — base64-gecodeerde .jks keystore
+#    SIGNING_KEY_ALIAS       — alias binnen de keystore
+#    SIGNING_KEY_PASSWORD    — wachtwoord van de key
+#    SIGNING_STORE_PASSWORD  — wachtwoord van de keystore
+#  Dan voeg je een signingConfig toe in app/build.gradle.kts en
+#  een extra step in deze workflow die de keystore decodeert. Het
+#  commentaarblok onderaan dit bestand laat zien hoe.
+# =============================================================
+
+name: Build & Release APK
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Maak ook een GitHub Release aan'
+        required: true
+        default: false
+        type: boolean
+
+# Annuleer eerdere runs op dezelfde branch — bespaart CI-minuten
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Nodig om Releases aan te maken
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      # ---- 1. Code ophalen ----
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # nodig voor release notes generation
+
+      # ---- 2. JDK 17 (vereist door AGP 8.x) ----
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # ---- 3. Gradle setup met caching ----
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      # ---- 4. Genereer wrapper als deze nog niet in de repo zit ----
+      # (Android Studio doet dit normaal automatisch bij eerste sync,
+      # maar mocht de wrapper ontbreken dan ondervangen we dat hier.)
+      - name: Bootstrap Gradle wrapper if missing
+        run: |
+          if [ ! -f gradlew ]; then
+            echo "→ gradlew ontbreekt, wrapper genereren..."
+            gradle wrapper --gradle-version 8.10.2
+            chmod +x gradlew
+          else
+            echo "→ gradlew aanwezig"
+            chmod +x gradlew
+          fi
+
+      # ---- 5. Lint-check (niet-blokkerend, alleen waarschuwingen) ----
+      - name: Run Android lint
+        run: ./gradlew lintDebug --warning-mode=summary
+        continue-on-error: true
+
+      # ---- 6. Build de debug APK ----
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace --warning-mode=summary
+
+      # ---- 7. Hernoem APK met build-info ----
+      - name: Rename APK with build metadata
+        id: apk
+        run: |
+          SOURCE=$(find app/build/outputs/apk/debug -name "*.apk" | head -n1)
+          if [ -z "$SOURCE" ]; then
+            echo "::error::No APK found in build output"
+            exit 1
+          fi
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          NAME="senior-launcher-build${{ github.run_number }}-${SHORT_SHA}-debug.apk"
+          mkdir -p artifacts
+          cp "$SOURCE" "artifacts/$NAME"
+          echo "path=artifacts/$NAME" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME"          >> "$GITHUB_OUTPUT"
+          echo "→ APK: $NAME"
+          ls -lh "artifacts/$NAME"
+
+      # ---- 8. Upload als GitHub Actions artifact (altijd) ----
+      - name: Upload APK as workflow artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # ---- 9. Rolling "latest" release op push naar main ----
+      # Werkt de tag `latest` steeds bij met de nieuwste build.
+      # Eindgebruikers downloaden van:
+      #   https://github.com/<owner>/<repo>/releases/latest
+      - name: Update "latest" pre-release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest debug build"
+          body: |
+            **Automatische bouw van de laatste commit op `main`.**
+
+            • Build: `#${{ github.run_number }}`
+            • Commit: [`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+            • Datum: ${{ github.event.head_commit.timestamp }}
+
+            ⚠️ Dit is een **debug-signed** APK. Bij installatie toont Android een waarschuwing "Onbekende bron". Dat is normaal voor debug-builds.
+
+            Voor productie-distributie (Play Store) is een release-signed APK nodig — zie het commentaar in `.github/workflows/android.yml`.
+          files: ${{ steps.apk.outputs.path }}
+          prerelease: true
+          draft: false
+          make_latest: false  # versioned tags zijn de "echte" latest
+
+      # ---- 10. Versioned release op tag-push (git tag v1.0.0) ----
+      - name: Create versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.apk.outputs.path }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          make_latest: true
+
+      # ---- 11. Handmatige release via workflow_dispatch ----
+      - name: Create manual release
+        if: |
+          github.event_name == 'workflow_dispatch' &&
+          inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: manual-${{ github.run_number }}
+          name: "Manual build #${{ github.run_number }}"
+          body: "Handmatig getriggerde build van `${{ github.ref_name }}`."
+          files: ${{ steps.apk.outputs.path }}
+          prerelease: true
+
+# =============================================================
+#  Toekomst: Release-signed APK
+# =============================================================
+#  Als je later naar Play Store wilt, voeg deze step toe vóór
+#  "Build debug APK" en bouw met assembleRelease in plaats van
+#  assembleDebug:
+#
+#    - name: Decode signing keystore
+#      run: |
+#        echo "${{ secrets.SIGNING_KEY_BASE64 }}" | base64 -d > app/keystore.jks
+#
+#    - name: Build release APK
+#      env:
+#        SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+#        SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+#        SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+#      run: ./gradlew assembleRelease --stacktrace
+#
+#  En in app/build.gradle.kts onder android { signingConfigs { ... } }
+#  een release-config toevoegen die deze env-variabelen leest. Vraag
+#  het mij wanneer je zover bent.
+# =============================================================
